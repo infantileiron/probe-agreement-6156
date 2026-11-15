@@ -29,9 +29,9 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 恰好frontend/backend/worker/db/redis五服务，均有healthcheck与healthy依赖；数据库、Redis和共享心跳产物具名卷。演示清理 `docker compose down -v --remove-orphans`，保留数据时省略 `-v`。
 
-目录：`backend/src/{models,schemas,services,controllers,routes}`按六实体分层；`services/paired_data.py`校验CSV，`deming.py`与`agreement.py`计算；`config,utils,middlewares`包含数据库、JWT/口令摘要、队列、审计、错误。种子在 `backend/scripts/seed_demo.py`，`migrations/001_schema.sql`说明新库基线，实际启动用元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`，共享AgreementPlot与CalibrationMetrics用于总览/结果/报告，PairTable用于观测/结果。
+目录：`backend/src/{models,schemas,services,controllers,routes}`按六实体分层；`services/paired_data.py`流式校验CSV，`stream_store.py`键集分页与批量写入，`stream_stats.py`分块累计，`deming.py`/`agreement.py`保留单遍参考实现并提供矩参数入口；`config,utils,middlewares`包含数据库、JWT/口令摘要、队列、审计、错误。种子在 `backend/scripts/seed_demo.py`，`scripts/measure_peak.py`复跑导入/计算/归档/导出峰值，`migrations/001_schema.sql`说明新库基线与新增表列，实际启动用元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`，共享AgreementPlot与CalibrationMetrics用于总览/结果/报告，PairTable用于观测/结果/归档明细。
 
-测试、截图和日志在批次外层 `test-artifacts/gb-2302`，不进入本源码目录。
+测试、截图和日志在批次外层 `test-artifacts/gb-2302`，不进入本源码目录。自动化测试在 `backend/tests/`，验收与峰值测量脚本在 `backend/scripts/measure_peak.py`。
 
 本地开发：安装backend/requirements.txt，配置可用DATABASE_URL与REDIS_URL，从backend启动 `uvicorn src.main:app --reload`，另起 `python -m src.worker`。前端 `npm ci && npm run dev`，构建 `npm run build`。页面用轻量hash路由，无额外路由依赖。
 
@@ -53,7 +53,18 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 输入与统计口径
 
-CSV列 `pair_id,range_label,x,y`，量程为low/middle/high，每批最多5000组；配对ID必填、唯一，x/y必须有限且绝对值≤1e9，缺失值、NaN/Infinity和未知量程拒绝。最少4组才能计算。单位由批次两侧声明及探头组合共同校验，只接受kPa/bar/degC/mg/L；不同单位不自动换算。用户仍需保证真实采集对象、时刻和测量条件一致。
+CSV列 `pair_id,range_label,x,y`，量程为low/middle/high，整批可达百万行级（现场整日采集量），流式入口不再有5000行上限；配对ID必填、唯一，x/y必须有限且绝对值≤1e9，缺失值、NaN/Infinity和未知量程拒绝。最少4组才能计算。单位由批次两侧声明及探头组合共同校验，只接受kPa/bar/degC/mg/L；不同单位不自动换算。用户仍需保证真实采集对象、时刻和测量条件一致。
+
+两个导入入口：
+
+- `POST /datasets`（JSON，`csv_text`）保留原≤5000行契约，供小批量/脚本使用。
+- `POST /datasets/import?name=&x_unit=&y_unit=&description=`（`text/csv` 请求体）流式导入，行数不设5000上限（百万行已验收）。请求体先落入 `SpooledTemporaryFile`（超过8MiB转临时文件），服务端按5000行一批校验并写入 `paired_readings`。
+
+导入以批次状态 `importing` 开始，最后一批提交后才置为 `ready`；列表、详情、分页、研究和运行都只认 `ready`。因此任一行坏损、列数不符、非有限值或配对ID重复（含跨分块重复，由 `UNIQUE(dataset_id,pair_id)` 兜底）时整批不可见，失败批次当场清理，同名可立即重试。处理中进程崩溃留下的 `importing` 批次会在同名重试时清除。历史≤5000行批次仍保存在 `datasets.pairs` JSON 中，读取路径兼容。
+
+底稿明细分页：`GET /datasets/{id}/pairs?after=&limit=`（原始读数）、`GET /runs/{id}/points?after=&limit=&outside=`（逐对拟合与标记）、`GET /reports/{id}/points?after=&limit=`（归档明细）。`after` 为上一页返回的 `next_after`（自增主键），按导入顺序键集分页，不跳号不重复，也不会出现空尾页。单页上限1000。
+
+内存口径：导入与校准进程的峰值内存不随行数增长。导入只保留一批行和一个5000项的批内重复集合；校准分三个流式过程（均值、中心二阶矩、逐对标记），批次之间只保留小的部分和，第三遍才把逐对结果写入 `run_points`。百万行实测峰值 RSS 见下方“内存与验收”。
 
 Deming模型为 `y=intercept+slope*x`，**λ=var(y测量误差)/var(x测量误差)**，由外部重复测量或计量依据输入，不从本批读数方差自动估计。设Sxx/Syy/Sxy为样本中心二阶矩，Δ=Syy−λSxx，斜率为：
 
@@ -65,7 +76,11 @@ Bland–Altman差值固定为 **d=y−x**，横轴m=(x+y)/2，偏倚=mean(d)，�
 
 比例偏倚另用OLS拟合 `d=alpha+beta*m`，报告系数与描述性R²，不输出未经检验的p值或因果判断。均值读数m常量时返回不可估计/null及原因；差值常量时R²不可定义返回null。讨论容差±t只是使用者输入的领域阈值，不改变BA界限，也不自动给出合格/互换结论。
 
-结果保存原始读数、拟合值、y方向残差、均值、差值、界限外和讨论容差外标记。y方向残差RMSE只作残差摘要，不称为Deming的唯一优化目标。
+结果保存原始读数、拟合值、y方向残差、均值、差值、界限外和讨论容差外标记。逐对结果存于 `run_points`（旧批次仍写入运行结果JSON的 `points`），`runs.result` 只保留聚合量、`runs.sample` 保留有界图表抽样。y方向残差RMSE只作残差摘要，不称为Deming的唯一优化目标。
+
+统计与计数一律基于全部读数：`result.n`、`agreement.outside_loa`、`outside_tolerance` 来自第三遍全量扫描，而不是图表抽样。图表数据 `GET /runs/{id}/sample` 返回至多600行（400行等步长抽样＋补充前若干越界配对；小样本时就是全部行），响应同时给出 `sample_size`、`n` 与说明文字，前端与报告页均标注“抽样量 / 总数”。
+
+归档：管理员批准复核后生成报告时，逐对复制 `run_points` 到 `report_points`（分页读取、分批插入），快照JSON只存聚合量与 `points_in_report`。CSV `GET /reports/{id}/csv` 按1000行一页流式输出全部归档明细（BOM、原列 `pair_id,range_label,x,y,unit,mean,difference_y_minus_x,deming_fitted_y,residual_y,outside_loa,outside_tolerance`）。旧报告若只有 `snapshot.result.points` 仍按原快照导出，旧批次与旧报告均可继续读取。
 
 ## 模拟工作日
 
@@ -80,12 +95,26 @@ Seed为固定20261112的240组、三量程、两探头JQ-P17/JQ-P18，单位kPa�
 7. 09:30 分析师提交偏倚复核，管理员核准结论与限制。
 8. 09:35 viewer下载批准快照CSV；结果只留档，不向真实设备写参数。
 
+整日现场回放：同一流程换成百万行 `pairs_1m.csv`，09:00 通过 `POST /datasets/import` 流式导入（约5秒、峰值约65MiB），09:18 后台流式计算（约13秒、峰值约82MiB），09:23 底稿明细分页核对100万行不重不漏，09:35 归档并下载100万行明细CSV。统计与越界计数取自全部读数，两张图标注600/1000000抽样量。
+
 种子自然键幂等，重复运行不覆盖用户修改的批次说明。
+
+## 内存与验收
+
+测试与验收记录在批次外层 `test-artifacts/gb-2302/TESTING.md`（含命令、原始输出与本机版本信息）。核心结论：
+
+- 百万行导入：峰值 RSS 约 65 MiB（限额 256 MiB），1000000 行全部落库。
+- 百万行校准：峰值 RSS 约 82 MiB（限额 256 MiB），`run_points` 1000000 行，图表抽样 600 行。
+- 同口径 SQL 独立复算：均值、二阶矩、斜率、截距、偏倚、SD、界限、越界数（34420）与容差外数（450240）一致，误差在1e-10量级。
+- 底稿分页：1000 页×1000 行、严格升序、`count(*)` 与 `count(distinct pair_id)` 均为1000000。
+- 小样本（≤240行，多种分块大小）与原 `deming.regress`/`agreement.analyze` 单遍算法逐字段一致（相对误差≤1e-12）。
+- 末尾坏行、批内重复、跨分块重复均整批拒绝且计数为0，同名重试成功；分页边界（1、7、100、999、1000 行页宽，整倍数行数）无空尾页、无重复。
+- 既有≤5000行JSON批次与只有快照JSON的旧报告仍可计算/导出。
 
 ## 已知差异
 
 - 采用MySQL8.4 LTS而非8.0；同属MySQL8家族。
-- Redis列表无worker崩溃租约及自动重投、无取消；新库自动建表没有存量库版本化迁移/回滚。列表最多200条实体。
+- Redis列表无worker崩溃租约及自动重投、无取消；新库自动建表没有存量库版本化迁移/回滚（`migrations/001_schema.sql` 只记录新增表与列，存量库需人工迁移）。列表最多200条实体。
 - 不处理真实设备通信、单位换算、加权/异方差Deming或重复个体的层次模型；无校准参数CI。比例偏倚仅描述，不自动断言显著性。
 - 模拟数据不能用于真实设备合格判定；Google Fonts需联网，断网回退字体。
 

@@ -12,3 +12,5 @@ class DatasetCreate(BaseModel):
   return self
 class DatasetEdit(BaseModel):
  description:str=Field(max_length=2000)
+def check_units(x_unit,y_unit):
+ if x_unit!=y_unit or x_unit not in UNITS:raise ValueError("两侧单位须相同，且属于支持的单位；不会自动换算")

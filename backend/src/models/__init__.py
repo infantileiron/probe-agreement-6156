@@ -1,4 +1,6 @@
 from .dataset import PairedDataset
+from .reading import PairedReading
+from .point import RunPoint,ReportPoint
 from .instrument import InstrumentPair
 from .study import CalibrationStudy
 from .run import CalibrationRun

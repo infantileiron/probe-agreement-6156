@@ -4,6 +4,7 @@ from src.config.database import initialize,Session
 from src.models import PairedDataset,InstrumentPair,CalibrationStudy,CalibrationRun,BiasReview,Report,User
 from src.utils.security import hash_password
 from src.services.run_service import compute
+from src.services.report_service import create as create_report
 
 def make_pairs():
  rng=random.Random(20261112);rows=[]
@@ -20,15 +21,16 @@ def seed():
   for role in ["admin","analyst","viewer"]:
    email=role+"@probe.demo"
    if not db.scalar(select(User).where(User.email==email)):db.add(User(id="user-"+role,email=email,role=role,password_hash=hash_password("ProbeDemo2026!")))
-  if not db.get(PairedDataset,"demo-dataset"):db.add(PairedDataset(id="demo-dataset",name="霁川双探头 2026-11 配对",x_unit="kPa",y_unit="kPa",pairs=make_pairs(),description="240组模拟成对读数、三量程；文件jichuan_probe_pairs_202611.csv"))
+  if not db.get(PairedDataset,"demo-dataset"):db.add(PairedDataset(id="demo-dataset",name="霁川双探头 2026-11 配对",x_unit="kPa",y_unit="kPa",pairs=make_pairs(),description="240组模拟成对读数、三量程；文件jichuan_probe_pairs_202611.csv",pair_count=240))
   if not db.get(InstrumentPair,"demo-instrument"):db.add(InstrumentPair(id="demo-instrument",name="JQ-P17 / JQ-P18 压力探头",x_serial="JQ-P17",y_serial="JQ-P18",unit="kPa",description="两侧均有测量误差；误差方差比来自模拟重复测量假设"))
   db.commit()
   if not db.get(CalibrationStudy,"demo-study"):db.add(CalibrationStudy(id="demo-study",name="三量程压力探头比对",dataset_id="demo-dataset",instrument_id="demo-instrument",variance_ratio=2.25,tolerance=2.))
   db.commit()
-  if not db.get(CalibrationRun,"demo-run"):db.add(CalibrationRun(id="demo-run",study_id="demo-study",status="queued",result={},error=""));db.commit();compute(db,"demo-run")
+  if not db.get(CalibrationRun,"demo-run"):db.add(CalibrationRun(id="demo-run",study_id="demo-study",status="queued",result={},sample=[],progress=0,phase="",error=""));db.commit();compute(db,"demo-run")
   if not db.get(BiasReview,"demo-review"):db.add(BiasReview(id="demo-review",run_id="demo-run",action="先复核高量程的比例偏倚与四个偏差点；一致性界限不是CI，不能据此直接判定两探头可互换。",state="approved",reviewer="admin@probe.demo"))
   db.commit()
-  if not db.get(Report,"demo-report"):db.add(Report(id="demo-report",review_id="demo-review",title="霁川双探头校准复核底稿",snapshot={"result":db.get(CalibrationRun,"demo-run").result,"action":db.get(BiasReview,"demo-review").action,"reviewer":"admin@probe.demo"}))
-  db.commit()
+  if not db.get(Report,"demo-report"):
+   class _Body:review_id="demo-review";title="霁川双探头校准复核底稿"
+   create_report(db,_Body())
   return {cls.__tablename__:db.scalar(select(func.count()).select_from(cls)) for cls in [User,PairedDataset,InstrumentPair,CalibrationStudy,CalibrationRun,BiasReview,Report]}
 if __name__=="__main__":print(json.dumps(seed(),ensure_ascii=False))

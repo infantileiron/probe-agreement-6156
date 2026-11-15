@@ -1,7 +1,7 @@
 from ..services import dataset_service
 from ..models.dataset import PairedDataset
-from ..models.common import serialize
-from .common import listing,require
-def list_all(db):return listing(db,PairedDataset)
-def detail(db,ident):return serialize(require(db,PairedDataset,ident))
-def create(db,body):return serialize(dataset_service.create(db,body))
+from .common import dataset_ids,dataset_summary,require,require_dataset
+def list_all(db):
+ return [dataset_summary(db,require(db,PairedDataset,ident)) for ident in dataset_ids(db)]
+def detail(db,ident):return dataset_summary(db,require_dataset(db,ident))
+def create(db,body):return dataset_summary(db,dataset_service.create(db,body))

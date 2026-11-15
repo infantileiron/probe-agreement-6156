@@ -1,3 +1,24 @@
--- New MySQL baseline: SQLAlchemy metadata creates datasets, instruments, studies, runs, reviews, reports, users, audits.
+-- New MySQL baseline: SQLAlchemy metadata creates all tables.
 -- Study variance_ratio and tolerance explicitly use DOUBLE.
--- Existing deployments require reviewed migrations; automatic destructive upgrades are not provided.
+--
+-- Streaming storage (added for million-row imports):
+--   paired_readings(id BIGINT PK, dataset_id, pair_id, range_label, x, y)
+--     UNIQUE(dataset_id, pair_id), INDEX(dataset_id, id)
+--     Raw rows for imports larger than the legacy JSON payload.
+--   datasets.pair_count INT, datasets.status VARCHAR(20) DEFAULT 'ready'
+--     Only status='ready' batches are listed/usable; a streaming import commits
+--     chunks under status='importing' and flips to 'ready' last. Legacy batches
+--     keep their <=5000-row JSON pairs and status 'ready'.
+--   run_points(id BIGINT PK, run_id, pair_id, ... markings)
+--     UNIQUE(run_id, pair_id), INDEX(run_id, id)
+--   report_points(id BIGINT PK, report_id, pair_id, ... markings)
+--     UNIQUE(report_id, pair_id), INDEX(report_id, id)
+--     The archive copy made when a report is approved; old reports keep their
+--     snapshot JSON and remain exportable.
+--   runs.sample JSON, runs.progress INT, runs.phase VARCHAR(20)
+--     Bounded chart sample (<=600 rows) and phase progress. run.result holds
+--     aggregates only.
+--
+-- Existing deployments require reviewed migrations; automatic destructive
+-- upgrades are not provided. A pre-existing datasets table needs the two new
+-- columns before the new code serves it.

@@ -30,3 +30,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 批次验收产物不入库
+test-artifacts/
